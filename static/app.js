@@ -11,6 +11,9 @@ let reprintMode = false;     // 原位补印模式开关
 const reprintSel = new Map(); // 补印选择：页码 -> Set（0 基页内序号）；界面角标与 API 序号为 +1
 let samplingItems = null;    // 最近一次 /api/sampling 返回的抽检清单（items 数组）
 let samplingBody = null;     // 生成该清单时使用的请求体（下载 CSV 复用，保证清单与 CSV 一致）
+let cutPlan = null;          // 当前页 /api/cut-plan 返回的裁切工序单
+let cutPlanPage = 0;         // cutPlan 对应的页码
+let cutSeq = 0;              // 裁切工序请求序号：翻页 / 改参数后丢弃过期响应
 
 /* ---------------- 标签行 ---------------- */
 
@@ -205,6 +208,7 @@ async function renderPage() {
     host.innerHTML = svg;
     if (reprintMode) applyReprintOverlay();
     applySamplingOverlay();
+    applyCutOverlay();
   } catch (err) {
     host.innerHTML =
       `<div class="svg-error"><strong>无法生成本页 SVG：</strong>${escapeHtml(err.message)}</div>`;
@@ -495,6 +499,125 @@ $("sampling-csv").addEventListener("click", async () => {
   }
 });
 
+/* ---------------- 直线裁切工序单 ---------------- */
+
+function resetCutPlan() {
+  // 参数或页码变化时作废旧工序单；cutSeq 自增使在途请求返回后被丢弃
+  cutPlan = null;
+  cutPlanPage = 0;
+  cutSeq++;
+}
+
+async function refreshCutPlan() {
+  // 按当前参数向服务端重算本页裁切工序（参数或页码变化后调用）
+  if (!lastPlan || !lastParams) return;
+  const seq = ++cutSeq;
+  const page = currentPage;
+  $("cut-result").innerHTML =
+    `<div class="req-result muted">正在按当前参数重算第 ${page} 页的裁切工序…</div>`;
+  $("cut-note").textContent = "";
+  let data;
+  try {
+    const resp = await fetch("/api/cut-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page, params: lastParams }),
+    });
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map((d) => d.msg).join("；")
+        : data.detail;
+      throw new Error(detail || "裁切工序计算失败");
+    }
+  } catch (err) {
+    if (seq !== cutSeq) return; // 已有更新的请求，丢弃过期结果
+    cutPlan = null;
+    cutPlanPage = 0;
+    $("cut-result").innerHTML =
+      `<div class="req-result err"><strong>无法计算裁切工序：</strong>${escapeHtml(err.message)}</div>`;
+    applyCutOverlay();
+    return;
+  }
+  if (seq !== cutSeq || page !== currentPage) return;
+  cutPlan = data;
+  cutPlanPage = page;
+  renderCutResult(data);
+  applyCutOverlay();
+}
+
+function renderCutResult(data) {
+  const host = $("cut-result");
+  if (!data.feasible) {
+    host.innerHTML =
+      `<div class="req-result err"><strong>本页无法直线裁切：</strong>${escapeHtml(data.message || "")}</div>`;
+    $("cut-note").textContent = "预览中不叠加刀线。";
+    return;
+  }
+  if (!data.steps || !data.steps.length) {
+    host.innerHTML =
+      `<div class="req-result muted">本页至多一个标签 / 占用区，无需下刀。</div>`;
+    return;
+  }
+  let html = `<div class="sampling-total">本页共 <strong>${data.steps.length}</strong> 刀
+      （按顺序执行；每刀横贯所属纸块，坐标为原纸毫米；预览中紫色虚线为刀线）：</div>
+    <div class="stock-table-wrap"><table class="stock-table cut-table">
+      <thead><tr>
+        <th>步骤</th><th>方向</th><th>刀线（原纸坐标 mm）</th><th>所属纸块（左上角 + 尺寸 mm）</th>
+      </tr></thead><tbody>`;
+  for (const s of data.steps) {
+    const vertical = s.direction === "vertical";
+    const dir = vertical ? "竖切（分左右）" : "横切（分上下）";
+    const line = vertical
+      ? `X = ${s.x1}，Y ${s.y1} → ${s.y2}`
+      : `Y = ${s.y1}，X ${s.x1} → ${s.x2}`;
+    const p = s.piece;
+    html += `<tr>
+      <td>#${s.step}</td>
+      <td class="cut-dir">${dir}</td>
+      <td class="cut-pos">${line}</td>
+      <td class="cut-pos">(${p.x}, ${p.y})　${p.width} × ${p.height}</td>
+    </tr>`;
+  }
+  html += "</tbody></table></div>";
+  host.innerHTML = html;
+}
+
+function applyCutOverlay() {
+  removeCutOverlay();
+  if (!cutPlan || cutPlanPage !== currentPage || !cutPlan.feasible) return;
+  if (!$("cut-overlay").checked) return;
+  const svg = document.querySelector("#svg-host svg");
+  if (!svg) return;
+  const layer = document.createElementNS(SVG_NS, "g");
+  layer.setAttribute("class", "cut-layer");
+  for (const s of cutPlan.steps) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("class", "cut-line");
+    line.setAttribute("x1", s.x1);
+    line.setAttribute("y1", s.y1);
+    line.setAttribute("x2", s.x2);
+    line.setAttribute("y2", s.y2);
+    layer.appendChild(line);
+    // 步骤序号标在刀线中点（带白底，避免压在标签文字上看不清）
+    const mx = (s.x1 + s.x2) / 2;
+    const my = (s.y1 + s.y2) / 2;
+    const tag = document.createElementNS(SVG_NS, "text");
+    tag.setAttribute("class", "cut-idx");
+    tag.setAttribute("x", mx);
+    tag.setAttribute("y", my - 0.8);
+    tag.textContent = `#${s.step}`;
+    layer.appendChild(tag);
+  }
+  svg.appendChild(layer);
+}
+
+function removeCutOverlay() {
+  document.querySelectorAll("#svg-host g.cut-layer").forEach((g) => g.remove());
+}
+
+$("cut-overlay").addEventListener("change", applyCutOverlay);
+
 /* ---------------- 结果汇总 ---------------- */
 
 function renderSummary(plan) {
@@ -714,16 +837,22 @@ $("params-form").addEventListener("submit", async (e) => {
     lastPlan = await resp.json();
     // 参数已重新提交：旧页码 / 页内序号可能失效，清空全部补印选择
     reprintSel.clear();
+    // 拼版参数已变化：旧裁切工序单作废（renderPage 前清空，避免短暂叠加旧刀线）
+    resetCutPlan();
     renderSummary(lastPlan);
     $("preview-wrap").hidden = false;
     // 拼版结果已变化：按新结果重建抽检张数输入并清空旧清单（不沿用旧位置）
     rebuildSamplingPanel(lastPlan);
     $("sampling-panel").hidden = false;
+    $("cut-panel").hidden = false;
     await renderPage();
+    await refreshCutPlan();
   } catch (err) {
     lastPlan = null;
+    resetCutPlan();
     $("preview-wrap").hidden = true;
     $("sampling-panel").hidden = true;
+    $("cut-panel").hidden = true;
     clearSamplingResult();
     $("summary").className = "summary";
     $("summary").innerHTML =
@@ -732,11 +861,17 @@ $("params-form").addEventListener("submit", async (e) => {
 });
 
 $("prev-page").addEventListener("click", async () => {
-  if (currentPage > 1) { currentPage--; await renderPage(); }
+  if (currentPage > 1) {
+    currentPage--;
+    await renderPage();
+    await refreshCutPlan(); // 页码变化后重新获取本页裁切工序
+  }
 });
 $("next-page").addEventListener("click", async () => {
   if (lastPlan && currentPage < lastPlan.pages.length) {
-    currentPage++; await renderPage();
+    currentPage++;
+    await renderPage();
+    await refreshCutPlan();
   }
 });
 

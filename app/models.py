@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -348,4 +350,65 @@ class RequisitionVoidRequest(BaseModel):
 
     order_no: str = Field(
         ..., min_length=1, max_length=40, description="需要作废的领料单号"
+    )
+
+
+# ---------------- 拼版纸张直线裁切工序单 ----------------
+
+
+class CutPiece(BaseModel):
+    """被下刀的纸块（原纸毫米坐标，原点为纸张左上角）。"""
+
+    x: float = Field(..., description="纸块左上角 X mm")
+    y: float = Field(..., description="纸块左上角 Y mm")
+    width: float = Field(..., description="纸块宽度 mm")
+    height: float = Field(..., description="纸块高度 mm")
+
+
+class CutStep(BaseModel):
+    """一刀：横贯所属纸块的直线刀线（坐标均为原纸毫米）。
+
+    direction=vertical：竖直刀线（x 固定，从纸块顶边直到底边，分成左右两块）；
+    direction=horizontal：水平刀线（y 固定，从纸块左边直到右边，分成上下两块）。
+    (x1, y1) → (x2, y2) 为刀线两个端点；step 为从 1 开始的执行顺序
+    （父刀先于子刀，可直接按序执行）；piece 为本刀所属（被切）纸块。
+    """
+
+    step: int = Field(..., description="执行顺序（从 1 开始，先父刀后子刀）")
+    direction: Literal["vertical", "horizontal"]
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    piece: CutPiece = Field(..., description="本刀所属纸块（被切纸块）")
+
+
+class CutPlanRequest(BaseModel):
+    """直线裁切工序单请求：拼版参数与 /api/layout 完全一致，附带页码。
+
+    服务端按 params 重新计算完整拼版后取该页，以标签实际矩形与
+    （首页）占用区为禁切区域搜索刀线，不信任前端传来的排版位置。
+    """
+
+    page: int = Field(..., ge=1, description="页码（从 1 开始）")
+    params: LayoutRequest
+
+
+class CutPlanResponse(BaseModel):
+    """一页的直线裁切工序单。
+
+    feasible=false 表示该页无法直线裁切：steps 恒为空（不返回任何部分
+    步骤），message 给出中文原因；feasible=true 时 message 为 null。
+    N 个禁切区域的可行工序恒含 N-1 刀（每刀把一块分成两块，最终 N 块
+    各含至多一个标签 / 占用区）。
+    """
+
+    page: int
+    feasible: bool = Field(..., description="该页是否存在可行的直线裁切方案")
+    steps: list[CutStep] = Field(
+        default_factory=list,
+        description="可复现的裁切步骤（顺序、原纸坐标、方向、所属纸块）；不可行时为空",
+    )
+    message: str | None = Field(
+        None, description="无法直线裁切时的中文说明；可行时为 null"
     )

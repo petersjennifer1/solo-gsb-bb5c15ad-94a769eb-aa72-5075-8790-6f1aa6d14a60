@@ -138,6 +138,21 @@
       </div>
     </section>
 
+    <!-- 直线裁切工序单（显示在预览下方，与预览同列） -->
+    <section class="panel cut-panel" id="cut-panel" hidden>
+      <h2 class="panel-title">直线裁切工序单</h2>
+      <p class="hint">按当前拼版参数由服务端<strong>重算本页</strong>：以标签实际矩形与首页占用区为
+        <strong>禁切区域</strong>，每条刀线横贯当前纸块、不穿过禁切区域并把纸块分成两块，
+        递归到每块至多含一个标签或占用区。候选刀线按固定顺序尝试（先竖后横、坐标从小到大），
+        步骤顺序完全可复现；本页无法直线裁切时会明确说明，不给出部分步骤。
+        翻页或重新「生成拼版」后自动重算。</p>
+      <div class="cut-actions">
+        <label class="inline"><input type="checkbox" id="cut-overlay" checked /> 预览中叠加刀线</label>
+        <span id="cut-note" class="hint-inline"></span>
+      </div>
+      <div id="cut-result"></div>
+    </section>
+
     <!-- 印后抽检清单（显示在拼版结果下方，与预览同列） -->
     <section class="panel sampling-panel" id="sampling-panel" hidden>
       <h2 class="panel-title">印后抽检清单</h2>

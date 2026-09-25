@@ -14,11 +14,14 @@ from .calibration import (
     ensure_calibrated_bounds,
     solve_calibration,
 )
+from .cutplan import build_cut_plan
 from .db import db_session, init_db
 from .layout import compute_layout
 from .models import (
     Calibration,
     CalibrationData,
+    CutPlanRequest,
+    CutPlanResponse,
     LayoutRequest,
     LayoutResponse,
     RequisitionConfirmRequest,
@@ -49,7 +52,7 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # 由 SQLite 写锁 + BEGIN IMMEDIATE 保证领料事务的并发正确
 init_db()
 
-app = FastAPI(title="小批量标签拼版工具", version="1.6.0")
+app = FastAPI(title="小批量标签拼版工具", version="1.7.0")
 
 
 @app.get("/health", tags=["meta"])
@@ -161,6 +164,27 @@ def api_calibration_solve(req: CalibrationData) -> Calibration:
     """由基准刻线的设计/实测坐标分别拟合 X、Y 方向线性走纸误差。"""
     try:
         return solve_calibration(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------- 拼版纸张直线裁切工序单 ----------------
+
+
+@app.post("/api/cut-plan", response_model=CutPlanResponse, tags=["cutting"])
+def api_cut_plan(req: CutPlanRequest) -> CutPlanResponse:
+    """直线裁切工序单：服务端按当前参数重算拼版并取指定页，以该页标签
+    实际矩形与（第一页的）首页占用区为禁切区域，递归搜索全宽 / 全高
+    直线刀线——每刀横贯当前纸块、不穿过禁切区域并把纸块分成两块，
+    直到每块至多含一个标签或占用区。
+
+    - 候选刀线固定按「先竖后横、坐标从小到大」尝试，失败状态记忆化，
+      同一参数返回完全可复现的步骤顺序；
+    - 每步给出方向（vertical/horizontal）、原纸坐标与所属纸块；
+    - 无可行方案时 feasible=false 且 steps 为空（不返回部分步骤）。
+    """
+    try:
+        return build_cut_plan(req.params, req.page)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
