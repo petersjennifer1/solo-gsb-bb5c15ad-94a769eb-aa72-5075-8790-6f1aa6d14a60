@@ -261,6 +261,64 @@ class SamplingResponse(BaseModel):
     total: int = Field(..., description="本次抽检成品总张数")
 
 
+# ---------------- 直线裁切工序单 ----------------
+
+
+class CuttingRequest(BaseModel):
+    """直线裁切工序单请求：拼版参数与 /api/layout 完全一致，附带页码。
+
+    服务端按 params 重新计算拼版，取指定页的标签实际矩形与（第一页的）
+    占用区作为禁切区域，递归搜索横贯纸块、不穿过禁切区域的直线刀。
+    """
+
+    page: int = Field(..., ge=1, description="页码（从 1 开始）")
+    params: LayoutRequest
+
+
+class CutBlock(BaseModel):
+    """刀线所属纸块（原纸坐标，毫米）。"""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class CutStep(BaseModel):
+    """一刀：横贯所属纸块的直线，把纸块分成两块（原纸坐标，毫米）。
+
+    direction 为 vertical（竖刀，x = position 的竖直线）或
+    horizontal（横刀，y = position 的水平线）；(x1,y1)-(x2,y2) 为刀线
+    两个端点，正好落在所属纸块的两条对边上。
+    """
+
+    step: int = Field(..., description="下刀顺序（从 1 开始，先外层后子块）")
+    direction: str = Field(..., description="vertical=竖刀，horizontal=横刀")
+    position: float = Field(..., description="刀线位置：竖刀为 x，横刀为 y")
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    block: CutBlock
+
+
+class CuttingResponse(BaseModel):
+    """直线裁切工序单。
+
+    feasible=false 表示该页无法直线裁切：此时 steps 必为空（不返回
+    部分步骤），message 给出中文说明。
+    """
+
+    page: int
+    feasible: bool
+    label_count: int = Field(..., description="本页禁切区域中的标签数")
+    occupied_count: int = Field(
+        ..., description="本页禁切区域中的占用区数（仅第一页非零）"
+    )
+    steps: list[CutStep]
+    message: str | None = Field(None, description="无法直线裁切时的中文说明")
+
+
 # ---------------- 纸张库存与领料 ----------------
 
 

@@ -658,6 +658,146 @@ def main() -> int:
     assert "1,1,2,测试签,20,0,20,20,P-002" in csv_lines
     assert "5,3,2,测试签,20,0,20,20,P-010" in csv_lines
 
+    # ---- 直线裁切工序单：横贯刀线、禁切区避让、固定顺序、不可裁切与可复现 ----
+    from .cutting import build_cutting_plan
+
+    def _verify_cut_steps(resp, req: LayoutRequest, page: int) -> None:
+        """模拟执行工序单：每刀必须横贯其所属纸块、不穿过任何禁切区域、
+        并把纸块分成两块；全部执行后每个纸块至多含一个禁切区域。"""
+        plan = compute_layout(req)
+        pg = plan.pages[page - 1]
+        regions = [
+            (l.x, l.y, l.x + l.width, l.y + l.height) for l in pg.labels
+        ]
+        if page == 1:
+            regions += [
+                (z.x, z.y, z.x + z.width, z.y + z.height)
+                for z in plan.occupied_zones
+            ]
+        blocks = [(0.0, 0.0, plan.page_width, plan.page_height)]
+        for s in resp.steps:
+            blk = (
+                s.block.x, s.block.y,
+                s.block.x + s.block.width, s.block.y + s.block.height,
+            )
+            hit = None
+            for b in blocks:
+                if all(abs(u - v) <= 1e-6 for u, v in zip(blk, b)):
+                    hit = b
+                    break
+            assert hit is not None, f"刀线所属纸块不是当前纸块之一: {blk}"
+            blocks.remove(hit)
+            bx0, by0, bx1, by1 = hit
+            # 刀线只需避让当前纸块内的禁切区域（块外区域与刀线线段不相交）
+            inner = [
+                r for r in regions
+                if r[0] >= bx0 - 1e-6 and r[2] <= bx1 + 1e-6
+                and r[1] >= by0 - 1e-6 and r[3] <= by1 + 1e-6
+            ]
+            c = s.position
+            if s.direction == "vertical":
+                assert bx0 < c < bx1, f"竖刀不在纸块内部: {s}"
+                assert abs(s.x1 - c) <= 1e-6 and abs(s.x2 - c) <= 1e-6
+                assert abs(s.y1 - by0) <= 1e-6 and abs(s.y2 - by1) <= 1e-6, (
+                    f"竖刀未横贯纸块: {s}"
+                )
+                for r in inner:
+                    assert not (r[0] < c < r[2]), f"刀线穿过禁切区域 {r}"
+                blocks += [(bx0, by0, c, by1), (c, by0, bx1, by1)]
+            else:
+                assert by0 < c < by1, f"横刀不在纸块内部: {s}"
+                assert abs(s.y1 - c) <= 1e-6 and abs(s.y2 - c) <= 1e-6
+                assert abs(s.x1 - bx0) <= 1e-6 and abs(s.x2 - bx1) <= 1e-6, (
+                    f"横刀未横贯纸块: {s}"
+                )
+                for r in inner:
+                    assert not (r[1] < c < r[3]), f"刀线穿过禁切区域 {r}"
+                blocks += [(bx0, by0, bx1, c), (bx0, c, bx1, by1)]
+        for blk in blocks:
+            inside = [
+                r for r in regions
+                if r[0] >= blk[0] - 1e-6 and r[2] <= blk[2] + 1e-6
+                and r[1] >= blk[1] - 1e-6 and r[3] <= blk[3] + 1e-6
+            ]
+            assert len(inside) <= 1, f"裁切完成后纸块仍含多个禁切区域: {blk}"
+
+    # 2×2 网格（40×40 纸、20×20 标签、0 间距）：先竖刀 x=20 横贯整纸，
+    # 再对左、右纸块各一刀横刀 y=20——固定顺序下步骤完全可复现
+    cut_grid = LayoutRequest(
+        page_width=40, page_height=40,
+        labels=[LabelSpec(width=20, height=20, count=4)],
+    )
+    cg = build_cutting_plan(cut_grid, 1)
+    assert cg.feasible and cg.message is None
+    assert cg.label_count == 4 and cg.occupied_count == 0
+    assert [(s.direction, s.position) for s in cg.steps] == [
+        ("vertical", 20), ("horizontal", 20), ("horizontal", 20),
+    ]
+    s0 = cg.steps[0]
+    assert (s0.x1, s0.y1, s0.x2, s0.y2) == (20, 0, 20, 40)  # 横贯整纸
+    assert (s0.block.x, s0.block.y, s0.block.width, s0.block.height) == (0, 0, 40, 40)
+    assert (cg.steps[1].block.x, cg.steps[1].block.width) == (0, 20)   # 左纸块
+    assert (cg.steps[2].block.x, cg.steps[2].block.width) == (20, 20)  # 右纸块
+    assert [s.step for s in cg.steps] == [1, 2, 3]
+    _verify_cut_steps(cg, cut_grid, 1)
+    # 同一参数重算：步骤顺序与坐标完全可复现
+    assert build_cutting_plan(cut_grid, 1).model_dump() == cg.model_dump()
+
+    # 禁切区域不超过 1 个：无需裁切
+    cut_one = build_cutting_plan(plain, 1)  # plain：40×40 纸单个 20×20 标签
+    assert cut_one.feasible and cut_one.steps == [] and cut_one.label_count == 1
+
+    # 首页占用区同为禁切区域：刀线可贴着占用区边缘走，但不得穿过
+    cut_occ_req = LayoutRequest(
+        page_width=100, page_height=100,
+        gap_x=2, gap_y=2,
+        labels=[LabelSpec(width=20, height=20, count=2)],
+        occupied_zones=[OccupiedZone(x=0, y=0, width=30, height=100)],
+    )
+    co = build_cutting_plan(cut_occ_req, 1)
+    assert co.feasible and co.occupied_count == 1 and co.label_count == 2
+    assert [(s.direction, s.position) for s in co.steps] == [
+        ("vertical", 30), ("vertical", 52),
+    ]
+    _verify_cut_steps(co, cut_occ_req, 1)
+
+    # 交错禁切区（占用区围成风车状 + 中央标签）：任何横贯纸块的直刀
+    # 都会穿过禁切区域——整页不可直线裁切，不返回任何部分步骤
+    cut_bad_req = LayoutRequest(
+        page_width=30, page_height=30,
+        labels=[LabelSpec(width=5, height=5, count=1)],
+        occupied_zones=[
+            OccupiedZone(x=0, y=0, width=20, height=10),
+            OccupiedZone(x=20, y=0, width=10, height=20),
+            OccupiedZone(x=10, y=20, width=20, height=10),
+            OccupiedZone(x=0, y=10, width=10, height=20),
+        ],
+    )
+    cb = build_cutting_plan(cut_bad_req, 1)
+    assert not cb.feasible and cb.steps == []
+    assert cb.message and "无法直线裁切" in cb.message
+    assert cb.label_count == 1 and cb.occupied_count == 4
+
+    # 页码越界：明确中文错误
+    try:
+        build_cutting_plan(cut_grid, 2)
+    except ValueError as exc:
+        assert "页码超出范围" in str(exc), str(exc)
+    else:
+        raise AssertionError("裁切工序单页码越界却未报错")
+
+    # 含边距 / 间距 / 多规格的真实版面：通用校验（横贯、避让、终块唯一）
+    cut_smoke = build_cutting_plan(smoke, 1)
+    assert cut_smoke.feasible
+    _verify_cut_steps(cut_smoke, smoke, 1)
+    # 首页占用区避让版面（40 份 50×30 标签 + 100×100 占用区）：
+    # 可裁切则逐步校验；不可裁切则必须无部分步骤且带中文说明
+    cut_occ2 = build_cutting_plan(occ, 1)
+    if cut_occ2.feasible:
+        _verify_cut_steps(cut_occ2, occ, 1)
+    else:
+        assert cut_occ2.steps == [] and cut_occ2.message
+
     # ---- 纸张库存与领料：登记、事务扣纸、幂等重试、冲突与库存不足 ----
     from .db import connect as db_connect, create_schema
     from .stock import (

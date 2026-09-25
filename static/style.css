@@ -262,6 +262,40 @@ button:disabled { opacity: 0.45; cursor: default; }
 }
 .svg-host svg .rp-idx.sel { fill: #b45309; font-weight: bold; }
 
+/* ---------------- 直线裁切工序单 ---------------- */
+
+.cutting-panel { grid-column: 2; }
+@media (max-width: 900px) { .cutting-panel { grid-column: 1; } }
+
+.cutting-actions {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin: 10px 0;
+}
+.cutting-table td.ct-pos {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  white-space: nowrap;
+}
+
+/* 预览 SVG 内的裁切刀线层（坐标单位即毫米，随 viewBox 缩放；
+   不拦截鼠标事件，补印点选可同时进行） */
+.svg-host svg .ct-line {
+  stroke: #7c3aed;
+  stroke-width: 0.5;
+  stroke-dasharray: 3 1.6;
+  pointer-events: none;
+}
+.svg-host svg .ct-badge {
+  fill: #7c3aed;
+  pointer-events: none;
+}
+.svg-host svg .ct-idx {
+  font-family: Arial, sans-serif;
+  font-size: 2.4px;
+  fill: #ffffff;
+  font-weight: bold;
+  pointer-events: none;
+}
+
 /* ---------------- 印后抽检清单 ---------------- */
 
 .sampling-panel { grid-column: 2; }

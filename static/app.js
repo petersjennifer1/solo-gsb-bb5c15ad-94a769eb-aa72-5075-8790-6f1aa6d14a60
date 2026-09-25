@@ -11,6 +11,9 @@ let reprintMode = false;     // 原位补印模式开关
 const reprintSel = new Map(); // 补印选择：页码 -> Set（0 基页内序号）；界面角标与 API 序号为 +1
 let samplingItems = null;    // 最近一次 /api/sampling 返回的抽检清单（items 数组）
 let samplingBody = null;     // 生成该清单时使用的请求体（下载 CSV 复用，保证清单与 CSV 一致）
+let cuttingPlan = null;      // 当前页 /api/cutting 返回的直线裁切工序单
+const cuttingCache = new Map(); // 页码 -> 工序单（重新生成拼版时清空，参数变化后重新获取）
+let cuttingSeq = 0;          // 请求序号，防止翻页 / 重算时旧响应覆盖新结果
 
 /* ---------------- 标签行 ---------------- */
 
@@ -213,7 +216,137 @@ async function renderPage() {
   $("prev-page").disabled = currentPage <= 1;
   $("next-page").disabled = currentPage >= lastPlan.pages.length;
   updateReprintStatus();
+  // 页码或参数变化后重新获取本页裁切工序单（带页码缓存，同一页不重复请求）
+  await refreshCutting();
 }
+
+/* ---------------- 直线裁切工序单 ---------------- */
+
+async function fetchCutting(page) {
+  const resp = await fetch("/api/cutting", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ page, params: lastParams }),
+  });
+  if (!resp.ok) throw new Error(await apiError(resp, "裁切工序单生成失败"));
+  return resp.json();
+}
+
+async function refreshCutting() {
+  if (!lastPlan || !lastParams) return;
+  const seq = ++cuttingSeq;
+  const page = currentPage;
+  const cached = cuttingCache.get(page);
+  if (cached) {
+    cuttingPlan = cached;
+    renderCuttingPanel();
+    applyCuttingOverlay();
+    return;
+  }
+  $("cutting-result").innerHTML =
+    `<div class="req-result muted">正在计算第 ${page} 页的直线裁切工序…</div>`;
+  let data;
+  try {
+    data = await fetchCutting(page);
+  } catch (err) {
+    if (seq !== cuttingSeq || page !== currentPage) return;
+    cuttingPlan = null;
+    removeCuttingOverlay();
+    $("cutting-result").innerHTML =
+      `<div class="req-result err"><strong>无法生成裁切工序单：</strong>${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  cuttingCache.set(page, data);
+  if (seq !== cuttingSeq || page !== currentPage) return; // 已翻页或重新生成
+  cuttingPlan = data;
+  renderCuttingPanel();
+  applyCuttingOverlay();
+}
+
+function renderCuttingPanel() {
+  const host = $("cutting-result");
+  if (!cuttingPlan) { host.innerHTML = ""; return; }
+  const p = cuttingPlan;
+  const regions = p.label_count + p.occupied_count;
+  if (!p.feasible) {
+    // 无可行方案：只说明原因，不展示任何部分步骤
+    host.innerHTML =
+      `<div class="req-result err"><strong>本页无法直线裁切：</strong>${escapeHtml(p.message || "")}</div>`;
+    return;
+  }
+  if (!p.steps.length) {
+    host.innerHTML =
+      `<div class="req-result muted">第 ${p.page} 页禁切区域共 ${regions} 个` +
+      `（标签 ${p.label_count}、占用区 ${p.occupied_count}），不超过 1 个：本页无需直线裁切。</div>`;
+    return;
+  }
+  let html = `<div class="sampling-total">第 ${p.page} 页：禁切区域 <strong>${regions}</strong> 个
+      （标签 ${p.label_count}、占用区 ${p.occupied_count}），共 <strong>${p.steps.length}</strong> 刀；
+      按步骤顺序下刀，每刀横贯所属纸块（坐标均为原纸毫米坐标）：</div>
+    <div class="stock-table-wrap"><table class="stock-table cutting-table">
+      <thead><tr>
+        <th>步骤</th><th>方向</th><th>刀线位置 (mm)</th>
+        <th>刀线起点 → 终点</th><th>所属纸块（左上角，宽 × 高）</th>
+      </tr></thead><tbody>`;
+  for (const s of p.steps) {
+    const dir = s.direction === "vertical" ? "竖刀" : "横刀";
+    const pos = s.direction === "vertical" ? `x = ${s.position}` : `y = ${s.position}`;
+    html += `<tr>
+      <td>${s.step}</td>
+      <td>${dir}</td>
+      <td class="ct-pos">${pos}</td>
+      <td class="ct-pos">(${s.x1}, ${s.y1}) → (${s.x2}, ${s.y2})</td>
+      <td class="ct-pos">(${s.block.x}, ${s.block.y})，${s.block.width} × ${s.block.height}</td>
+    </tr>`;
+  }
+  html += "</tbody></table></div>";
+  host.innerHTML = html;
+}
+
+function applyCuttingOverlay() {
+  removeCuttingOverlay();
+  if (!cuttingPlan || !cuttingPlan.feasible || !cuttingPlan.steps.length) return;
+  if (!$("show-cutting").checked) return;
+  const svg = document.querySelector("#svg-host svg");
+  if (!svg) return;
+  const layer = document.createElementNS(SVG_NS, "g");
+  layer.setAttribute("class", "cutting-layer");
+  for (const s of cuttingPlan.steps) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("class", "ct-line");
+    line.setAttribute("x1", s.x1);
+    line.setAttribute("y1", s.y1);
+    line.setAttribute("x2", s.x2);
+    line.setAttribute("y2", s.y2);
+    layer.appendChild(line);
+    // 步骤序号徽标：从刀线起点沿刀线方向略偏移，避免压到纸块边缘
+    const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const off = Math.min(3, len / 2);
+    const bx = s.x1 + (dx / len) * off;
+    const by = s.y1 + (dy / len) * off;
+    const badge = document.createElementNS(SVG_NS, "circle");
+    badge.setAttribute("class", "ct-badge");
+    badge.setAttribute("cx", bx);
+    badge.setAttribute("cy", by);
+    badge.setAttribute("r", 2);
+    const tag = document.createElementNS(SVG_NS, "text");
+    tag.setAttribute("class", "ct-idx");
+    tag.setAttribute("x", bx);
+    tag.setAttribute("y", by + 0.85);
+    tag.setAttribute("text-anchor", "middle");
+    tag.textContent = s.step;
+    layer.appendChild(badge);
+    layer.appendChild(tag);
+  }
+  svg.appendChild(layer);
+}
+
+function removeCuttingOverlay() {
+  document.querySelectorAll("#svg-host g.cutting-layer").forEach((g) => g.remove());
+}
+
+$("show-cutting").addEventListener("change", applyCuttingOverlay);
 
 /* ---------------- 原位补印：预览点选与导出 ---------------- */
 
@@ -719,11 +852,21 @@ $("params-form").addEventListener("submit", async (e) => {
     // 拼版结果已变化：按新结果重建抽检张数输入并清空旧清单（不沿用旧位置）
     rebuildSamplingPanel(lastPlan);
     $("sampling-panel").hidden = false;
+    // 拼版参数已变化：清空裁切工序缓存，按新参数重新获取当前页工序单
+    cuttingCache.clear();
+    cuttingPlan = null;
+    cuttingSeq++;
+    $("cutting-panel").hidden = false;
+    $("cutting-result").innerHTML = "";
     await renderPage();
   } catch (err) {
     lastPlan = null;
     $("preview-wrap").hidden = true;
     $("sampling-panel").hidden = true;
+    $("cutting-panel").hidden = true;
+    cuttingCache.clear();
+    cuttingPlan = null;
+    cuttingSeq++;
     clearSamplingResult();
     $("summary").className = "summary";
     $("summary").innerHTML =
